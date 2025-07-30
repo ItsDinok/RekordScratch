@@ -1,0 +1,328 @@
+#![allow(non_snake_case)]
+use lofty::{read_from_path, ItemKey, TaggedFileExt};
+use indicatif::{ProgressBar, ProgressStyle};
+use sysinfo::{System, SystemExt, DiskExt};
+use std::io::{BufRead, BufReader, Write};
+use std::collections::HashMap;
+use std::path::{Path};
+use walkdir::WalkDir;
+use std::fs::File;
+use clap::Parser;
+use std::fs;
+use std::io;
+use dirs;
+
+
+//-------------------------------------------------------------------------------------------------------------------------------------
+// TASKLIST
+//
+// TODO: See if I can still read this tomorrow
+// TODO: Change code usage of playlists to only refer to the .txt files, maybe use 'rekordcrates'?
+// TODO: -h --help -help flag
+// FIXME: Progress bar jumps when track not recognised
+// TODO: Predictive time analysis on progress bar
+// TESTME: See if overwriting breaks things
+
+//--------------------------------------------------------------------------------------------------------------------------------------
+// REGION: Path detection
+
+// This function detects external drives and checks if they are rekordboxed
+// RETURNS: Drive letter
+fn DetectRemovableDrives() -> String {
+    let mut sys = System::new_all();
+    sys.refresh_disks_list();
+
+    // Iterate through all disks
+    for disk in sys.disks() {
+        if disk.is_removable() {
+            // Check for rekordboxing 
+            let mountPoint = disk.mount_point().to_string_lossy();
+            if let Some(driveLetter) = mountPoint.chars().next() {
+                let driveLetterString = driveLetter.to_string();
+                if DetectRekordboxMarkers(&driveLetterString) {
+                    return driveLetterString;
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+// This function checks if a USB has the standard rekordbox stuff
+// RETURNS: Boolean corresponding to if it is a rekordbox USB
+fn DetectRekordboxMarkers(driveLetter: &str) -> bool {
+    // Assemble path
+    let path = format!("{}:\\", driveLetter); 
+
+    // Rekordbox sticks have a "Contents" and a "PIONEER" folder
+    let isContents = Path::new(&path).join("Contents").is_dir();
+    let isPioneer = Path::new(&path).join("PIONEER").is_dir();
+
+    isContents && isPioneer
+}
+
+// This detects the users' desktop
+// RETURNS: String corresponding to users desktop
+fn GetDesktopPath() -> String {
+    let deskPath = dirs::desktop_dir().and_then(|path| path.to_str().map(|s| s.to_string()));
+
+    let deskPath = match deskPath {
+        Some(path) => path,
+        None => {
+            eprintln!("Could not detect desktop directory");
+            std::process::exit(1);
+        }
+    };
+
+    return deskPath;
+}
+
+// ENDREGION
+// -------------------------------------------------------------------------------------------------------------------------------------
+
+
+// -------------------------------------------------------------------------------------------------------------------------------------
+// REGION: TrackMap construction
+
+// This parses all playlist.txt files in a directory and adds titles to trackMap
+// RETURNS: Nothing, but modifies the trackMap
+fn BuildMapFromTxt(trackMap: &mut HashMap<String, String>, txtPath: &str) -> std::io::Result<()> {
+    // Iterate through all txt files in the directory
+    for entryResult in fs::read_dir(txtPath)? {
+        let entry = entryResult?;
+        let path = entry.path();
+
+        // Check if it is a file and ends in .txt
+        if path.is_file() {
+            if let Some(ext) = path.extension() {
+                // run parser function
+                if ext == "txt" {
+                    ExtractTitlesFromFile(&path, trackMap)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// This populates the hashmap with the titles from the provided txt
+// RETURNS: Error, but main contribution is changing the trackMap
+fn ExtractTitlesFromFile(filepath: &Path, map: &mut HashMap<String, String>) -> std::io::Result<()> {
+    let file = File::open(filepath)?;
+    let reader = BufReader::new(file);
+    let filename = filepath.file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    // Iterate throigh each entry in file
+    for (i, line_res) in reader.lines().enumerate() {
+        let line = line_res?;
+
+        // Skip header
+        if i == 0 {continue;} 
+   
+        // Third column is track title
+        // Track title ALWAYS exists
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() > 2 {
+            let title = parts[2].trim().to_string();
+
+               map.insert(title, filename.clone());
+        }
+    }
+
+    Ok(())
+}
+
+// ENDREGION
+// -------------------------------------------------------------------------------------------------------------------------------------
+
+// -------------------------------------------------------------------------------------------------------------------------------------
+// REGION: Copy files
+
+// This gets the title from track metadata
+// RETURNS: String or error
+fn ExtractTitleFromPath(path: &Path) -> anyhow::Result<Option<String>> {
+    let taggedFile = read_from_path(path)?;
+
+    if let Some(tag) = taggedFile.primary_tag() {
+        if let Some(title) = tag.get_string(&ItemKey::TrackTitle) {
+            return Ok(Some(title.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+// This function creates the playlist folder on the desktop, reducing user input
+// RETURNS: Nothing, it modifies OS state
+fn CreatePlaylistsFolder(deskPath: &str) {
+    let folder = Path::new(deskPath).join("Playlists");
+    fs::create_dir_all(folder).expect("Unable to create playlists folder.");
+}
+
+// This copies the track to folders
+// RETURNS: None this is one of the terminal functions
+fn CopyTrackToFolder(outputRoot: &Path, folderName: &str, srcPath: &Path) -> std::io::Result<()> {
+    // Clean folder name by removing .txt
+    let folder = folderName.replace(".txt", "");
+    
+    // Build destination directory and create it
+    let destDir = outputRoot.join(&folder);
+    fs::create_dir_all(&destDir)?;
+
+    // Build destination file path
+    let filename = srcPath.file_name().unwrap();
+    let mut destPath = destDir;
+    destPath.push(filename);
+
+    // Copy file
+    fs::copy(srcPath, &destPath)?;
+
+    Ok(())
+}
+
+// This copies the files to their respective folders
+// RETURNS: Nothing, this is the final function
+fn MoveAllMp3(trackMap: &HashMap<String, String>, root: &str, deskPath: &str) {
+    // UX Debug information
+    let mut tracksNotMatched = 0;
+    let mut tracksMatched = 0;
+    let mut unsorted = Vec::<String>::new();
+    CreatePlaylistsFolder(deskPath);
+
+    // Collect all MP3 files into a vec
+    let entries: Vec<_> = WalkDir::new(root).into_iter().filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file() && e.path().extension().map_or(false, |ext| ext.eq_ignore_ascii_case("mp3"))).collect();
+
+    // Set up progress bar
+    let bar = ProgressBar::new(entries.len() as u64);
+    bar.set_style(ProgressStyle::default_bar()
+        .template("{bar:40.cyan/blue} {pos}/{len}\n{msg}").unwrap());
+
+    // Iterate through all .mp3 files in Contents
+    for entry in entries {
+        let mut matched = false;
+        
+        let path = entry.path();
+        let outputRoot = Path::new(deskPath).join("Playlists");
+
+        // Extract title and compare against dictionary
+        if let Ok(Some(title)) = ExtractTitleFromPath(path) {
+            bar.set_message(format!("Processing: {}", title));
+
+            if let Some(folder) = trackMap.get(&title) {
+                if let Err(e) = CopyTrackToFolder(&outputRoot, folder, path) {
+                    eprintln!("Failed to copy {}: {}", path.display(), e);
+                }
+                else {
+                    tracksMatched += 1;
+                    matched = true;
+                }
+            }
+        }
+        else {
+            eprintln!("No title metadata found for: {}", path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown filename."));
+        }
+
+        // Search by filename instead (sometimes the way)
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()){
+            if let Some(folder) = trackMap.get(stem) {
+                if let Err(e) = CopyTrackToFolder(&outputRoot, folder, path) {
+                    eprintln!("Failed to copy {}: {}", path.display(), e);
+                }
+                else {
+                    tracksMatched += 1;
+                    matched = true;
+                }
+            }
+        }
+
+        if !matched {
+            // No match found in dictionary
+            tracksNotMatched += 1;
+            let trackTitle = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown filename");
+            unsorted.push(trackTitle.to_string());
+        }
+
+        bar.inc(1);
+   }
+
+    println!("{} tracks not matched.", tracksNotMatched);
+    println!("{} tracks matched successfully.", tracksMatched);
+
+    let mut file = File::create("NotMatched.txt").expect("Error creating output file");
+    for line in unsorted {
+        writeln!(file, "{}", line).expect("Failed to write to file.");
+    }
+}
+
+// ENDREGION
+// --------------------------------------------------------------------------------------------------------------------------------------
+
+// --------------------------------------------------------------------------------------------------------------------------------------
+// REGION: Argument/flag manager
+
+#[derive(Parser, Debug)]
+#[command(author, version, about)]
+struct Args {
+    /// Playlists.txt path (-t or --target)
+    #[arg(short = 't', long = "target")]
+    target: Option<String>
+}
+
+// This sets the location of the playlists.txt files
+// RETURNS: Nothing, file will terminate here if not valid
+fn SetTxtFileLocation() -> String {
+    let path = Path::new("Playlists");
+    if path.exists() && path.is_dir() {
+        return path.to_str().unwrap().to_string();
+    }
+    else {
+        eprintln!("Playlists folder not detected and no playlists file provided");
+        std::process::exit(1);
+    }
+}
+
+// --------------------------------------------------------------------------------------------------------------------------------------
+
+fn main() -> std::io::Result<()> {
+    // Flags
+    let args = Args::parse();
+
+    println!("----------------------------------------------------------------------------");
+    println!("RekordScratch v1.0");
+    println!("This tool currently only works if you only have ONE rekordbox USB connected.");
+    println!("Non-rekordbox drives will be ignored.");
+    println!("----------------------------------------------------------------------------");
+
+    let mut trackMap: HashMap<String, String> = HashMap::new();
+   
+    // Paths
+    let desktopPath = GetDesktopPath();
+    let txtPath = args.target.unwrap_or_else(|| SetTxtFileLocation());
+    let originPath = format!("{}:\\Contents", DetectRemovableDrives());
+    
+    // Ensure user has rekordbox drive connected
+    if originPath == "" {
+        println!("No rekordbox drive detected.");
+        std::process::exit(1);
+    }
+
+    println!("\nDetected rekordbox drive at: {}", originPath);
+
+    // TODO: Make this step dynamic (or local?)
+    println!("\nBuilding track map...");
+    BuildMapFromTxt(&mut trackMap, &txtPath)?;
+    println!("Trackmap built!");
+   
+    println!("\nCopying files...\n");
+    MoveAllMp3(&trackMap, &originPath, &desktopPath);
+
+    println!("Files moved!\nPress ENTER to exit...");
+    let mut buffer = String::new();
+    let _ = io::stdin(&mut buffer); 
+
+    Ok(())
+}
