@@ -1,29 +1,24 @@
 # RekordScratch
 
-A terminal-based audio annotation and scratch tool written in Rust.
+🧩 A Rust-based tool to **recover MP3 files** from Rekordbox-formatted USB drives, restoring them to their original folder layout.
 
-## 🎧 What is RekordScratch?
+## 🎛️ What is RekordScratch?
 
-RekordScratch is a command-line tool designed to help DJs, researchers, and developers **scrub through audio**, **mark significant timestamps**, and **create structured logs** of audio files using keyboard input. It's ideal for use cases like:
+**RekordScratch** solves a simple but frustrating problem for DJs:  
+**Once you've exported tracks to a USB using Rekordbox, there's no built-in way to get them back in their original folder structure.** RekordScratch fixes that.
 
-- Beat matching and tempo analysis
-- Track annotation
-- Machine learning preprocessing
-- Custom DJ workflow tools
+Whether you’ve lost your source library or just want your organization back, this tool extracts MP3s from a Rekordbox-playable USB and restores them to their original hierarchy — if recoverable.
 
-## 🚀 Features
+## 🔧 Features
 
-- Terminal-based UI using `crossterm`
-- Real-time keypress interaction
-- Timestamped event logging
-- Customizable key bindings (soon)
-- Output in a structured log format
+- ✅ Extracts MP3s from Rekordbox-exported USBs
+- ✅ Rebuilds the original folder structure based on track metadata and file paths
+- ⚠️ Currently reads the USB's `PIONEER` structure directly (no RB database parsing yet)
 
-## 🛠️ Installation
+## ⚙️ Usage
 
-Ensure you have Rust installed. Then clone and build:
+1. Plug in your Rekordbox-formatted USB.
+2. Run the tool from the command line:
 
 ```bash
-git clone https://github.com/ItsDinok/RekordScratch.git
-cd RekordScratch
-cargo build --release
+cargo run --release
