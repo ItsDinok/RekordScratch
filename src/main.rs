@@ -36,6 +36,8 @@ use dirs;
 // TODO: Double check I haven't used too many .clone()
 // TODO: Break up MP3 function
 
+// FIXME: Late trackmap DOES NOT WORK
+
 // NOTE: This file is 600 lines long. A lot of that is comments, but it should still be broken up
 // NOTE: Main is a little more tangled than I would like but UI is like that
 //--------------------------------------------------------------------------------------------------------------------------------------
@@ -157,6 +159,14 @@ fn ExtractTitlesFromFile(filepath: &Path, map: &mut HashMap<String, String>) -> 
 // -------------------------------------------------------------------------------------------------------------------------------------
 // REGION: Copy files
 
+// This is a utility function which handles setting error messages
+// RETURNS: Nothing, modified app state
+fn AppError(app: &Arc<Mutex<App>>, msg: String) {
+    if let Ok(mut guard) = app.lock() {
+        guard.SetError(msg.to_string());
+    }
+}
+
 // This gets the title from track metadata
 // RETURNS: String or error
 fn ExtractTitleFromPath(path: &Path) -> anyhow::Result<Option<String>> {
@@ -270,10 +280,7 @@ fn MoveAllMp3(trackMap: &HashMap<String, String>, root: &str, deskPath: &str,
 
             if let Some(folder) = trackMap.get(&title) {
                 if let Err(e) = CopyTrackToFolder(&outputRoot, folder, path) {
-                    {
-                        let mut app = app.lock().unwrap();
-                        app.SetError(format!("Failed to copy {}: {}", path.display(), e));
-                    }
+                    AppError(&app, format!("Failed to copy {}: {}", path.display(), e));    
                 }
                 else {
                     tracksMatched += 1;
@@ -285,10 +292,7 @@ fn MoveAllMp3(trackMap: &HashMap<String, String>, root: &str, deskPath: &str,
         else if let Some(stem) = path.file_stem().and_then(|s| s.to_str()){
             if let Some(folder) = trackMap.get(stem) {
                 if let Err(e) = CopyTrackToFolder(&outputRoot, folder, path) {
-                    {
-                        let mut app = app.lock().unwrap();
-                        app.SetError(format!("Failed to copy {}: {}", path.display(), e));
-                    }
+                    AppError(&app, format!("Failed to copy {}: {}", path.display(), e));  
                 }
                 else {
                     tracksMatched += 1;
@@ -301,10 +305,7 @@ fn MoveAllMp3(trackMap: &HashMap<String, String>, root: &str, deskPath: &str,
             // Default to genre data
             if let Ok(Some(genre)) = ExtractGenreFromPath(path) {
                 if let Err(e) = Genre_CopyTrackToFolder(&outputRoot, &genre, path) {
-                    {
-                        let mut app = app.lock().unwrap();
-                        app.SetError(format!("Failed to copy {}: {}", path.display(), e));
-                    }
+                    AppError(&app, format!("Failed to copy {}: {}", path.display(), e)); 
                 }
             }
 
@@ -312,17 +313,14 @@ fn MoveAllMp3(trackMap: &HashMap<String, String>, root: &str, deskPath: &str,
             tracksNotMatched += 1;
             let trackTitle = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown filename");
             unsorted.push(trackTitle.to_string());                    
-            { 
-                let mut app = app.lock().unwrap();
-                app.SetError(format!("Failed to identify playlist for: {}", trackTitle.to_string()));
-            }
+            AppError(&app, format!("Failed to identify playlist for: {}", trackTitle.to_string()));
         }
-   }
+    }
 
     {
         let mut app = app.lock().unwrap();
         app.SetError(format!("{} tracks not matched.", tracksNotMatched));
-        app.SetError(format!("{} tracks matched successfully.", tracksMatched));
+        app.SetStatusMessage(format!("{} tracks matched successfully.", tracksMatched));
     }
 
     let mut file = File::create("NotMatched.txt").expect("Error creating output file");
