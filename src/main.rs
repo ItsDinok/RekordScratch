@@ -19,6 +19,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use dirs;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 mod app;
 mod UIManager;
@@ -31,10 +32,10 @@ use UIManager::ui;
 //
 // TODO: Predictive time analysis on progress bar
 // TODO: Break up main function
-// TODO: Clean struct
 // TODO: Clean renderer
-// TODO: Expand UI
 // TODO: Smart error messages and error clearing
+// TODO: Untangle main()
+// TODO: Playlist view
 
 //--------------------------------------------------------------------------------------------------------------------------------------
 // REGION: Path detection
@@ -330,8 +331,7 @@ fn SetTxtFileLocation() -> String {
         return path.to_str().unwrap().to_string();
     }
     else {
-        eprintln!("Playlists folder not detected and no playlists file provided");
-        std::process::exit(1);
+        return String::new();
     }
 }
 
@@ -342,6 +342,9 @@ fn main() -> std::io::Result<()> {
 
     // Flags
     let args = Args::parse();
+
+    // Program state
+    let trackMap = Arc::new(Mutex::new(HashMap::new()));
 
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -357,55 +360,99 @@ fn main() -> std::io::Result<()> {
         app.SetStatusMessage("Copying files...");
         drop(app); // Release lock before slow work
 
-        let result = perform_long_copy(appClone);
-
-        let mut app = appClone.lock().unwrap();
-        match result {
-            Ok(_) => app.SetStatusMessage("Done!");
-            Err(e) => app.SetError(format!("Error: {}", e));
-        }
     });
 
-    // Preemtively check for drive
-    /*
+    // Check for paths and drives
     let letter = DetectRemovableDrives();
-    if letter.is_empty() {
-        app.drive_letter = format!("{}:\\", letter).into();
-        app.drive_detected = true;
+    if !letter.is_empty() {
+        if let Ok(mut app) = app.lock() {
+            app.SetDriveLetter(format!("{}:\\", letter));
+            app.SetDriveStatus(true);
+        }
     }
-    */
+
+    // User having no desktop is an unrecoverable issue
+    let desktopPath = GetDesktopPath();
+    // Lock mutex and access
+    if let Ok(mut app) = app.lock() {
+        app.SetDesktopStatus(true);
+    }
+   
+    // Check for playlists
+    let mut isPlaylistDetected = false;
+    
+    let txtPath = args.target.unwrap_or_else(|| SetTxtFileLocation());
+    if !txtPath.is_empty() {
+        if let Ok(mut app) = app.lock() {
+            app.SetPlaylistStatus(true);
+            isPlaylistDetected = true;
+        }
+    }
 
     loop {
         let appGuard = app.lock().unwrap();
         terminal.draw(|f| ui(f, &appGuard))?;
         drop(appGuard);
 
-        if event::poll(Duratiion::from_millis(100))? {
+        if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     // Exit
-                    KeyCode::char('q') => break,
+                    KeyCode::Char('q') => break,
                 
                     // Rescan drive (s for scan)
-                    KeyCode::char('s') => {
+                    KeyCode::Char('s') => {
                         let letter = DetectRemovableDrives();
                         let mut app = app.lock().unwrap();
                         if letter.is_empty() {
                             app.SetError("No drive detected.");
                             app.SetDriveLetter("N/A");
-                            app.drive_detected = false;
+                            app.SetDriveStatus(false);
                         } else {
                             app.SetDriveLetter(format!("{}:\\", letter));
-                            app.drive_detected = true;
+                            app.SetDriveStatus(true);
                             app.SetStatusMessage("Drive detected.");
                         }
-                    }
+                    },
                 
                     // Main logic, r for run
-                    KeyCode::char('r') => {
+                    KeyCode::Char('r') => {
+                        let appClone = Arc::clone(&app);
+                        std::thread::spawn (move || {
+                            
+                        });
+                    },
 
-                    }
+                    _ => continue
                 }
+            }
+           
+            let shouldBuild = {
+                let app = app.lock().unwrap();
+                app.playlist_detected && app.track_map_created == false
+            };
+
+            // Populate trackmap when needed
+            if shouldBuild {
+                let appClone = Arc::clone(&app);
+                let txtPathClone = txtPath.clone();
+                let trackMapClone = Arc::clone(&trackMap);
+
+                std::thread::spawn(move || {
+                    {
+                        let mut app = appClone.lock().unwrap();
+                        app.SetStatusMessage("Building trackmap");
+                    }
+                    {
+                        let mut map = trackMapClone.lock().unwrap();
+                        BuildMapFromTxt(&mut map, &txtPathClone);
+                    }
+                    {
+                        let mut app = appClone.lock().unwrap();
+                        app.SetStatusMessage("Trackmap built");
+                        app.track_map_created = true;
+                    }
+                });
             }
         }
     }
@@ -413,38 +460,11 @@ fn main() -> std::io::Result<()> {
     disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
 
-    println!("----------------------------------------------------------------------------");
-    println!("RekordScratch v1.0");
-    println!("This tool currently only works if you only have ONE rekordbox USB connected.");
-    println!("Non-rekordbox drives will be ignored.");
-    println!("----------------------------------------------------------------------------");
-
-    let mut trackMap: HashMap<String, String> = HashMap::new();
    
-    // Paths
-    let desktopPath = GetDesktopPath();
-    let txtPath = args.target.unwrap_or_else(|| SetTxtFileLocation());
-    let originPath = format!("{}:\\Contents", DetectRemovableDrives());
-    
-    // Ensure user has rekordbox drive connected
-    if originPath == "" {
-        println!("No rekordbox drive detected.");
-        std::process::exit(1);
-    }
-
-    println!("\nDetected rekordbox drive at: {}", originPath);
-
     // TODO: Make this step dynamic (or local?)
-    println!("\nBuilding track map...");
-    BuildMapFromTxt(&mut trackMap, &txtPath)?;
-    println!("Trackmap built!");
-   
-    println!("\nCopying files...\n");
-    MoveAllMp3(&trackMap, &originPath, &desktopPath);
-
-    //println!("Files moved!\nPress ENTER to exit...");
-    //let mut buffer = String::new();
-    //let _ = io::stdin(&mut buffer); 
+    //BuildMapFromTxt(&mut trackMap, &txtPath)?;
+    let originPath = "";
+    //MoveAllMp3(&trackMap, &originPath, &desktopPath);
 
     Ok(())
 }

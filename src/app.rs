@@ -1,4 +1,9 @@
 pub struct App {
+    pub mp3_copying: bool,
+    pub track_map_created: bool,
+
+    pub desktop_detected: bool,
+    pub playlist_detected: bool,
     pub drive_detected: bool,
     pub drive_letter: Option<String>,
     pub status_message: String,
@@ -10,6 +15,11 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         Self {
+            mp3_copying: false,
+            track_map_created: false,
+            desktop_detected: false,
+            playlist_detected: false,
+
             drive_detected: false,
             drive_letter: None,
             status_message: "Starting...".into(),
@@ -42,6 +52,22 @@ impl App {
 
     pub fn SetDriveStatus(&mut self, status: impl Into<bool>) {
         self.drive_detected = status.into();
+    }
+
+    pub fn SetCopyStatus(&mut self, status: impl Into<bool>) {
+        self.mp3_copying = status.into();
+    }
+
+    pub fn SetDesktopStatus(&mut self, status: impl Into<bool>) {
+        self.desktop_detected = status.into();
+    }
+
+    pub fn SetTrackMapStatus(&mut self, status: impl Into<bool>) {
+        self.track_map_created = status.into();
+    }
+
+    pub fn SetPlaylistStatus(&mut self, status: impl Into<bool>) {
+        self.playlist_detected = status.into();
     }
 }
 
