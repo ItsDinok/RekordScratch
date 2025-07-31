@@ -12,16 +12,12 @@ use std::fs;
 use std::io;
 use dirs;
 
-
 //-------------------------------------------------------------------------------------------------------------------------------------
 // TASKLIST
 //
-// TODO: See if I can still read this tomorrow
-// TODO: Change code usage of playlists to only refer to the .txt files, maybe use 'rekordcrates'?
 // TODO: -h --help -help flag
-// FIXME: Progress bar jumps when track not recognised
 // TODO: Predictive time analysis on progress bar
-// TESTME: See if overwriting breaks things
+// TODO ASPIRATIONAL: Integrate ratatui
 
 //--------------------------------------------------------------------------------------------------------------------------------------
 // REGION: Path detection
@@ -155,10 +151,24 @@ fn ExtractTitleFromPath(path: &Path) -> anyhow::Result<Option<String>> {
     Ok(None)
 }
 
-// This function creates the playlist folder on the desktop, reducing user input
+fn ExtractGenreFromPath(path: &Path) -> anyhow::Result<Option<String>> {
+    let taggedFile = read_from_path(path)?;
+    
+    if let Some(tag) = taggedFile.primary_tag() {
+        if let Some(genre) = tag.get_string(&ItemKey::Genre) {
+            return Ok(Some(genre.to_string()));
+        }
+    }
+
+    // Default to unknown genre
+    // This is to ensure ALL files get moved, organised or not
+    Ok(Some("Unknown Genre".to_string()))
+}
+
+// This function creates the RekordCrates folder on the desktop, reducing user input
 // RETURNS: Nothing, it modifies OS state
 fn CreatePlaylistsFolder(deskPath: &str) {
-    let folder = Path::new(deskPath).join("Playlists");
+    let folder = Path::new(deskPath).join("RekordCrates");
     fs::create_dir_all(folder).expect("Unable to create playlists folder.");
 }
 
@@ -176,6 +186,26 @@ fn CopyTrackToFolder(outputRoot: &Path, folderName: &str, srcPath: &Path) -> std
     let filename = srcPath.file_name().unwrap();
     let mut destPath = destDir;
     destPath.push(filename);
+
+    // Copy file
+    fs::copy(srcPath, &destPath)?;
+
+    Ok(())
+}
+
+// This function creates a RekordCrates subfolder on the desktop, corresponding to genre (Fallback)
+// RETURNS: Nothing, modifies OS state
+fn Genre_CopyTrackToFolder(outputRoot: &Path, folderName: &str, srcPath: &Path) -> std::io::Result<()> {
+    // Clean folder name by removing .txt
+    let folder = folderName.replace(".txt", "");
+    let destDir = outputRoot.join("Unsorted").join(&folder);
+
+    // Create directory structure
+    fs::create_dir_all(&destDir)?;
+
+    // Build destination filepath
+    let filename = srcPath.file_name().unwrap();
+    let destPath = destDir.join(filename);
 
     // Copy file
     fs::copy(srcPath, &destPath)?;
@@ -206,7 +236,7 @@ fn MoveAllMp3(trackMap: &HashMap<String, String>, root: &str, deskPath: &str) {
         let mut matched = false;
         
         let path = entry.path();
-        let outputRoot = Path::new(deskPath).join("Playlists");
+        let outputRoot = Path::new(deskPath).join("RekordCrates");
 
         // Extract title and compare against dictionary
         if let Ok(Some(title)) = ExtractTitleFromPath(path) {
@@ -222,12 +252,8 @@ fn MoveAllMp3(trackMap: &HashMap<String, String>, root: &str, deskPath: &str) {
                 }
             }
         }
-        else {
-            eprintln!("No title metadata found for: {}", path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown filename."));
-        }
-
         // Search by filename instead (sometimes the way)
-        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()){
+        else if let Some(stem) = path.file_stem().and_then(|s| s.to_str()){
             if let Some(folder) = trackMap.get(stem) {
                 if let Err(e) = CopyTrackToFolder(&outputRoot, folder, path) {
                     eprintln!("Failed to copy {}: {}", path.display(), e);
@@ -240,6 +266,13 @@ fn MoveAllMp3(trackMap: &HashMap<String, String>, root: &str, deskPath: &str) {
         }
 
         if !matched {
+            // Default to genre data
+            if let Ok(Some(genre)) = ExtractGenreFromPath(path) {
+                if let Err(e) = Genre_CopyTrackToFolder(&outputRoot, &genre, path) {
+                    eprintln!("Failed to copy {}: {}", path.display(), e);
+                }
+            }
+
             // No match found in dictionary
             tracksNotMatched += 1;
             let trackTitle = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown filename");
@@ -320,9 +353,9 @@ fn main() -> std::io::Result<()> {
     println!("\nCopying files...\n");
     MoveAllMp3(&trackMap, &originPath, &desktopPath);
 
-    println!("Files moved!\nPress ENTER to exit...");
-    let mut buffer = String::new();
-    let _ = io::stdin(&mut buffer); 
+    //println!("Files moved!\nPress ENTER to exit...");
+    //let mut buffer = String::new();
+    //let _ = io::stdin(&mut buffer); 
 
     Ok(())
 }
