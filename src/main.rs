@@ -29,18 +29,15 @@ use dirs;
 // TASKLIST
 //
 // TODO: xx/yy progress bar display
-// TODO: Break up main function
 // TODO: Clean renderer
-// TODO: Smart error messages and error clearing / time based error clearing
-// TODO: Untangle main()
 // TODO: Playlist view
 // TODO: Enable path resetting
-// TODO: Add validation that the four flags are ready before running mp3 copier
-// TODO: Break up megafunctions
-// TODO: COMMENT COMMENT COMMENT COMMENT (this code is unreadable in places)
-// NOTE: Regarding above: I know rust is hard to read, but this is worse than haskell
-// NOTE: Regarding above: Fuck async :)
 // TODO: Centralise 'set status' and 'set error'
+// TODO: Double check I haven't used too many .clone()
+// TODO: Break up MP3 function
+
+// NOTE: This file is 600 lines long. A lot of that is comments, but it should still be broken up
+// NOTE: Main is a little more tangled than I would like but UI is like that
 //--------------------------------------------------------------------------------------------------------------------------------------
 // REGION: Path detection
 
@@ -367,7 +364,11 @@ fn SetTxtFileLocation() -> String {
 
 // --------------------------------------------------------------------------------------------------------------------------------------
 // REGION: Main helper functions
+// NOTE: Main_ prefix indicates it is ONLY to be called from within the main function
+// If it has to be called from elsewhere it should be refactored
 
+// This checks for removable drives again
+// RETURNS: Drive name, and it changes app state
 fn Main_RemovableDriveCheck(app: Arc<Mutex<App>>) -> String {
     let letter = DetectRemovableDrives();
     if !letter.is_empty() {
@@ -382,6 +383,8 @@ fn Main_RemovableDriveCheck(app: Arc<Mutex<App>>) -> String {
     return String::new();
 }
 
+// This checks for the desktop
+// RETURNS: Desktop path string and alters app state
 fn Main_SetDesktopState(app: Arc<Mutex<App>>) -> String {
     // There is no validation here because there is the reasonable assumption our users have a desktop
     // If our users do not have a desktop I am quitting programming forever
@@ -393,6 +396,8 @@ fn Main_SetDesktopState(app: Arc<Mutex<App>>) -> String {
     return deskPath;
 }
 
+// This sets the playlists path
+// RETURNS: Playlists path, and it alters app state
 fn Main_SetPlaylistsPath(app: Arc<Mutex<App>>, args: Args) -> String {
     // TODO: Validate path
     let txtPath = args.target.unwrap_or_else(|| SetTxtFileLocation());
@@ -405,10 +410,92 @@ fn Main_SetPlaylistsPath(app: Arc<Mutex<App>>, args: Args) -> String {
     return txtPath;
 }
 
+// This is the secondary way to scan for drives
+// RETURNS: Drive letter string
+fn Main_RescanForDrives(app: Arc<Mutex<App>>) -> String {
+    let letter = DetectRemovableDrives();
+    let mut app = app.lock().unwrap();
+    
+    if letter.is_empty() {
+        app.SetError("No drive detected.");
+        app.SetDriveLetter("N/A");
+        app.SetDriveStatus(false);
+    } 
+    else {
+        let letter = format!("{}:\\", letter);
+        app.SetDriveLetter(letter);
+        app.SetDriveStatus(true);
+        app.SetStatusMessage("Drive detected.");
+    }
 
-// ENDREGION
-// ---------------------------------------------------------------------------------------------------------------------------------------
+    return letter;
+}
 
+fn Main_StartMp3(app: Arc<Mutex<App>>, origin: String, desktop: String, map: HashMap<String, String>) {
+    // Mutex clones
+    let appClone = Arc::clone(&app);
+    let desktopClone = desktop.clone();
+    let originClone = origin.clone(); 
+
+    std::thread::spawn (move || {
+        {
+            let mut app = appClone.lock().unwrap();
+            app.is_mp3_copying = true;
+            app.SetStatusMessage("Copying files...");
+            app.UpdateProgress(0.0);
+        }
+        
+        {
+            if let Err(e) = MoveAllMp3(&map, &originClone, &desktopClone, appClone.clone()) {
+                let mut app = appClone.lock().unwrap();
+                app.SetError(&format!("Error: {}", e));
+            } else {
+                let mut app = appClone.lock().unwrap();
+                app.SetStatusMessage("All files copied over!");
+            }
+        }
+        let mut app = appClone.lock().unwrap();
+        app.is_mp3_copying = false;
+    });
+
+}
+
+fn Main_BuildLateTrackMap(app: Arc<Mutex<App>>, txtPath: String, map: Arc<Mutex<HashMap<String, String>>>) {
+    let appClone = Arc::clone(&app);
+    let txtPathClone = txtPath.clone();
+    let mapClone = Arc::clone(&map);
+
+    std::thread::spawn(move || {
+        {
+            let mut app = appClone.lock().unwrap();
+            app.SetStatusMessage("Building trackmap");
+        }
+        {
+            let mut lockedMap = mapClone.lock().unwrap();
+            let _ = BuildMapFromTxt(&mut lockedMap, &txtPathClone);
+        }
+        {
+            let mut app = appClone.lock().unwrap();
+            app.SetStatusMessage("Trackmap built");
+            app.SetTrackMapStatus(true);
+        }
+    });
+}
+
+// This checks to see if all requirements are met to launch the mp3 function
+// RETURNS: Bool, true if all flags are good
+fn Main_CheckLaunchFlags(app: Arc<Mutex<App>>) -> bool {
+    let appClone = Arc::clone(&app);
+    let app = appClone.lock().unwrap();
+
+    return
+        app.desktop_detected &&
+        app.playlist_detected &&
+        app.track_map_created &&
+        app.drive_detected;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 
 fn main() -> std::io::Result<()> {
     enable_raw_mode()?;
@@ -418,6 +505,7 @@ fn main() -> std::io::Result<()> {
 
     // Program state
     let trackMap = Arc::new(Mutex::new(HashMap::new()));
+    let mut errorTicks = 0;
 
     // Establish ratatui state
     let mut stdout = io::stdout();
@@ -427,7 +515,7 @@ fn main() -> std::io::Result<()> {
     let app = Arc::new(Mutex::new(App::new()));
 
     // Check for paths and drives
-    let originPath = Main_RemovableDriveCheck(app.clone());
+    let mut originPath = Main_RemovableDriveCheck(app.clone());
     let desktopPath = Main_SetDesktopState(app.clone());
     let txtPath = Main_SetPlaylistsPath(app.clone(), args);
 
@@ -446,53 +534,25 @@ fn main() -> std::io::Result<()> {
                 
                     // Rescan drive (s for scan)
                     KeyCode::Char('s') => {
-                        let letter = DetectRemovableDrives();
-                        let mut app = app.lock().unwrap();
-                        if letter.is_empty() {
-                            app.SetError("No drive detected.");
-                            app.SetDriveLetter("N/A");
-                            app.SetDriveStatus(false);
-                        } else {
-                            app.SetDriveLetter(format!("{}:\\", letter));
-                            app.SetDriveStatus(true);
-                            app.SetStatusMessage("Drive detected.");
-                        }
-                    },
-                
+                        originPath = Main_RescanForDrives(app.clone());
+                    }
+
                     // Main logic, r for run
                     KeyCode::Char('r') => { 
                         {
-                            let appGuard = app.lock().unwrap();
+                            let mut appGuard = app.lock().unwrap();
                             if appGuard.is_mp3_copying { continue; }
+                        
+                            if !Main_CheckLaunchFlags(app.clone()) {
+                                // TODO: make this error more specific
+                                appGuard.SetError("Launch flags incomplete!");
+                                continue;
+                            }
                         }
-
-                        // Mutex clones
-                        let appClone = Arc::clone(&app);
-                        let mapClone = Arc::clone(&trackMap);
-                        let desktopClone = desktopPath.clone();
-                        let originClone = originPath.clone();
-
-                        std::thread::spawn (move || {
-                            {
-                                let mut app = appClone.lock().unwrap();
-                                app.is_mp3_copying = true;
-                                app.SetStatusMessage("Copying files...");
-                                app.UpdateProgress(0.0);
-                            }
-                            
-                            {
-                                let map = mapClone.lock().unwrap();
-                                if let Err(e) = MoveAllMp3(&map, &originClone, &desktopClone, appClone.clone()) {
-                                    let mut app = appClone.lock().unwrap();
-                                    app.SetError(&format!("Error: {}", e));
-                                } else {
-                                    let mut app = appClone.lock().unwrap();
-                                    app.SetStatusMessage("All files copied over!");
-                                }
-                            }
-                            let mut app = appClone.lock().unwrap();
-                            app.is_mp3_copying = false;
-                        });
+                        
+                        let trackMapClone = Arc::clone(&trackMap);
+                        let map = trackMapClone.lock().unwrap();
+                        Main_StartMp3(app.clone(), originPath.clone(), desktopPath.clone(), map.clone());
                     },
 
                     _ => continue
@@ -507,27 +567,18 @@ fn main() -> std::io::Result<()> {
 
             // Populate trackmap when needed
             if shouldBuild {
-                let appClone = Arc::clone(&app);
-                let txtPathClone = txtPath.clone();
-                let trackMapClone = Arc::clone(&trackMap);
-
-                std::thread::spawn(move || {
-                    {
-                        let mut app = appClone.lock().unwrap();
-                        app.SetStatusMessage("Building trackmap");
-                    }
-                    {
-                        let mut map = trackMapClone.lock().unwrap();
-                        let _ = BuildMapFromTxt(&mut map, &txtPathClone);
-                    }
-                    {
-                        let mut app = appClone.lock().unwrap();
-                        app.SetStatusMessage("Trackmap built");
-                        app.SetTrackMapStatus(true);
-                    }
-                });
+                let map = Arc::new(Mutex::new(HashMap::new()));
+                Main_BuildLateTrackMap(app.clone(), txtPath.clone(), Arc::clone(&map));
             }
         }
+
+        // Basic time-based error clearing
+        // 50k = 50 seconds
+        if errorTicks == 50000 {
+            let mut app = app.lock().unwrap();
+            app.SetError("");
+        }
+        errorTicks += 1;
     }
 
     disable_raw_mode()?;
