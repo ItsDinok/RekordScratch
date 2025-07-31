@@ -1,6 +1,6 @@
 [package]
 name = "RekordScratch"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
@@ -11,3 +11,5 @@ lofty = "0.17"
 walkdir = "2"
 anyhow = "1"
 dirs = "4.0"
+ratatui = "0.25"
+crossterm = "0.27"

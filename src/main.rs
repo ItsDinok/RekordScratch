@@ -10,14 +10,31 @@ use std::fs::File;
 use clap::Parser;
 use std::fs;
 use std::io;
+use crossterm::{
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen}
+};
+use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
 use dirs;
+use std::sync::{Arc, Mutex};
+
+mod app;
+mod UIManager;
+
+use app::App;
+use UIManager::ui;
 
 //-------------------------------------------------------------------------------------------------------------------------------------
 // TASKLIST
 //
-// TODO: -h --help -help flag
 // TODO: Predictive time analysis on progress bar
-// TODO ASPIRATIONAL: Integrate ratatui
+// TODO: Break up main function
+// TODO: Clean struct
+// TODO: Clean renderer
+// TODO: Expand UI
+// TODO: Smart error messages and error clearing
 
 //--------------------------------------------------------------------------------------------------------------------------------------
 // REGION: Path detection
@@ -122,7 +139,7 @@ fn ExtractTitlesFromFile(filepath: &Path, map: &mut HashMap<String, String>) -> 
         // Third column is track title
         // Track title ALWAYS exists
         let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() > 2 {
+        if parts.len() > 1 {
             let title = parts[2].trim().to_string();
 
                map.insert(title, filename.clone());
@@ -302,7 +319,7 @@ fn MoveAllMp3(trackMap: &HashMap<String, String>, root: &str, deskPath: &str) {
 struct Args {
     /// Playlists.txt path (-t or --target)
     #[arg(short = 't', long = "target")]
-    target: Option<String>
+    target: Option<String>,
 }
 
 // This sets the location of the playlists.txt files
@@ -321,8 +338,80 @@ fn SetTxtFileLocation() -> String {
 // --------------------------------------------------------------------------------------------------------------------------------------
 
 fn main() -> std::io::Result<()> {
+    enable_raw_mode()?;
+
     // Flags
     let args = Args::parse();
+
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let app = Arc::new(Mutex::new(App::new()));
+
+    let appClone = Arc::clone(&app);
+    std::thread::spawn(move || {
+        // Long-running work
+        let mut app = appClone.lock().unwrap();
+        app.SetStatusMessage("Copying files...");
+        drop(app); // Release lock before slow work
+
+        let result = perform_long_copy(appClone);
+
+        let mut app = appClone.lock().unwrap();
+        match result {
+            Ok(_) => app.SetStatusMessage("Done!");
+            Err(e) => app.SetError(format!("Error: {}", e));
+        }
+    });
+
+    // Preemtively check for drive
+    /*
+    let letter = DetectRemovableDrives();
+    if letter.is_empty() {
+        app.drive_letter = format!("{}:\\", letter).into();
+        app.drive_detected = true;
+    }
+    */
+
+    loop {
+        let appGuard = app.lock().unwrap();
+        terminal.draw(|f| ui(f, &appGuard))?;
+        drop(appGuard);
+
+        if event::poll(Duratiion::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    // Exit
+                    KeyCode::char('q') => break,
+                
+                    // Rescan drive (s for scan)
+                    KeyCode::char('s') => {
+                        let letter = DetectRemovableDrives();
+                        let mut app = app.lock().unwrap();
+                        if letter.is_empty() {
+                            app.SetError("No drive detected.");
+                            app.SetDriveLetter("N/A");
+                            app.drive_detected = false;
+                        } else {
+                            app.SetDriveLetter(format!("{}:\\", letter));
+                            app.drive_detected = true;
+                            app.SetStatusMessage("Drive detected.");
+                        }
+                    }
+                
+                    // Main logic, r for run
+                    KeyCode::char('r') => {
+
+                    }
+                }
+            }
+        }
+    }
+
+    disable_raw_mode()?;
+    execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
 
     println!("----------------------------------------------------------------------------");
     println!("RekordScratch v1.0");
