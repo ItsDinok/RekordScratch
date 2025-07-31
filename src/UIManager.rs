@@ -1,5 +1,4 @@
 use ratatui::{
-    backend::Backend,
     Frame,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
@@ -45,7 +44,6 @@ pub fn ui(f: &mut Frame, app: &App) {
         ("Desktop detected", app.desktop_detected),
         ("Playlist detected", app.playlist_detected),
         ("Track map created", app.track_map_created),
-        ("MP3 copying", app.mp3_copying),
     ];
 
     let bool_lines: Vec<Line> = bool_statuses.iter().map(|(label, state)| {

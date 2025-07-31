@@ -1,6 +1,5 @@
 #![allow(non_snake_case)]
 use lofty::{read_from_path, ItemKey, TaggedFileExt};
-use indicatif::{ProgressBar, ProgressStyle};
 use sysinfo::{System, SystemExt, DiskExt};
 use std::io::{BufRead, BufReader, Write};
 use std::collections::HashMap;
@@ -36,7 +35,13 @@ use UIManager::ui;
 // TODO: Smart error messages and error clearing
 // TODO: Untangle main()
 // TODO: Playlist view
-
+// TODO: Enable path resetting
+// TODO: Clear warnings from compiler
+// TODO: Add validation that the four flags are ready before running mp3 copier
+// TODO: Break up megafunctions
+// TODO: COMMENT COMMENT COMMENT COMMENT (this code is unreadable in places)
+// NOTE: Regarding above: I know rust is hard to read, but this is worse than haskell
+// NOTE: Regarding above: Fuck async :)
 //--------------------------------------------------------------------------------------------------------------------------------------
 // REGION: Path detection
 
@@ -233,7 +238,8 @@ fn Genre_CopyTrackToFolder(outputRoot: &Path, folderName: &str, srcPath: &Path) 
 
 // This copies the files to their respective folders
 // RETURNS: Nothing, this is the final function
-fn MoveAllMp3(trackMap: &HashMap<String, String>, root: &str, deskPath: &str) {
+fn MoveAllMp3(trackMap: &HashMap<String, String>, root: &str, deskPath: &str,
+    app: Arc<Mutex<App>>) -> io::Result<()> {
     // UX Debug information
     let mut tracksNotMatched = 0;
     let mut tracksMatched = 0;
@@ -243,26 +249,33 @@ fn MoveAllMp3(trackMap: &HashMap<String, String>, root: &str, deskPath: &str) {
     // Collect all MP3 files into a vec
     let entries: Vec<_> = WalkDir::new(root).into_iter().filter_map(Result::ok)
         .filter(|e| e.file_type().is_file() && e.path().extension().map_or(false, |ext| ext.eq_ignore_ascii_case("mp3"))).collect();
-
-    // Set up progress bar
-    let bar = ProgressBar::new(entries.len() as u64);
-    bar.set_style(ProgressStyle::default_bar()
-        .template("{bar:40.cyan/blue} {pos}/{len}\n{msg}").unwrap());
-
+   
+    let totalEntries = entries.len() as f64;
     // Iterate through all .mp3 files in Contents
-    for entry in entries {
+    for (idx, entry) in entries.iter().enumerate() {
         let mut matched = false;
         
         let path = entry.path();
         let outputRoot = Path::new(deskPath).join("RekordCrates");
 
+        {
+            let mut app = app.lock().unwrap();
+            app.UpdateProgress((idx as f64 + 1.0) / totalEntries);
+        }
+
         // Extract title and compare against dictionary
         if let Ok(Some(title)) = ExtractTitleFromPath(path) {
-            bar.set_message(format!("Processing: {}", title));
+            {
+                let mut app = app.lock().unwrap();
+                app.SetCurrentFile(format!("Processing: {}", title));
+            }
 
             if let Some(folder) = trackMap.get(&title) {
                 if let Err(e) = CopyTrackToFolder(&outputRoot, folder, path) {
-                    eprintln!("Failed to copy {}: {}", path.display(), e);
+                    {
+                        let mut app = app.lock().unwrap();
+                        app.SetError(format!("Failed to copy {}: {}", path.display(), e));
+                    }
                 }
                 else {
                     tracksMatched += 1;
@@ -274,7 +287,10 @@ fn MoveAllMp3(trackMap: &HashMap<String, String>, root: &str, deskPath: &str) {
         else if let Some(stem) = path.file_stem().and_then(|s| s.to_str()){
             if let Some(folder) = trackMap.get(stem) {
                 if let Err(e) = CopyTrackToFolder(&outputRoot, folder, path) {
-                    eprintln!("Failed to copy {}: {}", path.display(), e);
+                    {
+                        let mut app = app.lock().unwrap();
+                        app.SetError(format!("Failed to copy {}: {}", path.display(), e));
+                    }
                 }
                 else {
                     tracksMatched += 1;
@@ -287,26 +303,36 @@ fn MoveAllMp3(trackMap: &HashMap<String, String>, root: &str, deskPath: &str) {
             // Default to genre data
             if let Ok(Some(genre)) = ExtractGenreFromPath(path) {
                 if let Err(e) = Genre_CopyTrackToFolder(&outputRoot, &genre, path) {
-                    eprintln!("Failed to copy {}: {}", path.display(), e);
+                    {
+                        let mut app = app.lock().unwrap();
+                        app.SetError(format!("Failed to copy {}: {}", path.display(), e));
+                    }
                 }
             }
 
             // No match found in dictionary
             tracksNotMatched += 1;
             let trackTitle = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown filename");
-            unsorted.push(trackTitle.to_string());
+            unsorted.push(trackTitle.to_string());                    
+            { 
+                let mut app = app.lock().unwrap();
+                app.SetError(format!("Failed to identify playlist for: {}", trackTitle.to_string()));
+            }
         }
-
-        bar.inc(1);
    }
 
-    println!("{} tracks not matched.", tracksNotMatched);
-    println!("{} tracks matched successfully.", tracksMatched);
+    {
+        let mut app = app.lock().unwrap();
+        app.SetError(format!("{} tracks not matched.", tracksNotMatched));
+        app.SetError(format!("{} tracks matched successfully.", tracksMatched));
+    }
 
     let mut file = File::create("NotMatched.txt").expect("Error creating output file");
     for line in unsorted {
         writeln!(file, "{}", line).expect("Failed to write to file.");
     }
+
+    Ok(())
 }
 
 // ENDREGION
@@ -345,6 +371,7 @@ fn main() -> std::io::Result<()> {
 
     // Program state
     let trackMap = Arc::new(Mutex::new(HashMap::new()));
+    let mut originPath = String::new();
 
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -362,9 +389,11 @@ fn main() -> std::io::Result<()> {
 
     });
 
+    // TODO: Put these path checks into small functions
     // Check for paths and drives
     let letter = DetectRemovableDrives();
     if !letter.is_empty() {
+        originPath = format!("{}:\\", letter);
         if let Ok(mut app) = app.lock() {
             app.SetDriveLetter(format!("{}:\\", letter));
             app.SetDriveStatus(true);
@@ -377,15 +406,11 @@ fn main() -> std::io::Result<()> {
     if let Ok(mut app) = app.lock() {
         app.SetDesktopStatus(true);
     }
-   
-    // Check for playlists
-    let mut isPlaylistDetected = false;
     
     let txtPath = args.target.unwrap_or_else(|| SetTxtFileLocation());
     if !txtPath.is_empty() {
         if let Ok(mut app) = app.lock() {
             app.SetPlaylistStatus(true);
-            isPlaylistDetected = true;
         }
     }
 
@@ -416,10 +441,38 @@ fn main() -> std::io::Result<()> {
                     },
                 
                     // Main logic, r for run
-                    KeyCode::Char('r') => {
+                    KeyCode::Char('r') => { 
+                        {
+                            let appGuard = app.lock().unwrap();
+                            if appGuard.is_mp3_copying { continue; }
+                        }
+
+                        // Mutex clones
                         let appClone = Arc::clone(&app);
+                        let mapClone = Arc::clone(&trackMap);
+                        let desktopClone = desktopPath.clone();
+                        let originClone = originPath.clone();
+
                         std::thread::spawn (move || {
+                            {
+                                let mut app = appClone.lock().unwrap();
+                                app.is_mp3_copying = true;
+                                app.SetStatusMessage("Copying files...");
+                                app.UpdateProgress(0.0);
+                            }
                             
+                            {
+                                let map = mapClone.lock().unwrap();
+                                if let Err(e) = MoveAllMp3(&map, &originClone, &desktopClone, appClone.clone()) {
+                                    let mut app = appClone.lock().unwrap();
+                                    app.SetError(&format!("Error: {}", e));
+                                } else {
+                                    let mut app = appClone.lock().unwrap();
+                                    app.SetStatusMessage("All files copied over!");
+                                }
+                            }
+                            let mut app = appClone.lock().unwrap();
+                            app.is_mp3_copying = false;
                         });
                     },
 
@@ -445,12 +498,12 @@ fn main() -> std::io::Result<()> {
                     }
                     {
                         let mut map = trackMapClone.lock().unwrap();
-                        BuildMapFromTxt(&mut map, &txtPathClone);
+                        let _ = BuildMapFromTxt(&mut map, &txtPathClone);
                     }
                     {
                         let mut app = appClone.lock().unwrap();
                         app.SetStatusMessage("Trackmap built");
-                        app.track_map_created = true;
+                        app.SetTrackMapStatus(true);
                     }
                 });
             }
@@ -459,12 +512,5 @@ fn main() -> std::io::Result<()> {
 
     disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
-
-   
-    // TODO: Make this step dynamic (or local?)
-    //BuildMapFromTxt(&mut trackMap, &txtPath)?;
-    let originPath = "";
-    //MoveAllMp3(&trackMap, &originPath, &desktopPath);
-
     Ok(())
 }
