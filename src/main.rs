@@ -1,47 +1,46 @@
 #![allow(non_snake_case)]
-use lofty::{read_from_path, ItemKey, TaggedFileExt};
-use sysinfo::{System, SystemExt, DiskExt};
-use std::io::{BufRead, BufReader, Write};
-use std::collections::HashMap;
-use std::path::{Path};
-use walkdir::WalkDir;
-use std::fs::File;
-use clap::Parser;
-use std::fs;
-use std::io;
+mod app;
+mod UIManager;
+
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen}
 };
+use lofty::{read_from_path, ItemKey, TaggedFileExt};
+use sysinfo::{System, SystemExt, DiskExt};
+use std::io::{BufRead, BufReader, Write};
 use ratatui::backend::CrosstermBackend;
-use ratatui::Terminal;
-use dirs;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-
-mod app;
-mod UIManager;
-
-use app::App;
+use std::path::{Path};
+use ratatui::Terminal;
+use walkdir::WalkDir;
+use std::fs::File;
 use UIManager::ui;
+use clap::Parser;
+use app::App;
+use std::fs;
+use std::io;
+use dirs;
 
 //-------------------------------------------------------------------------------------------------------------------------------------
 // TASKLIST
 //
-// TODO: Predictive time analysis on progress bar
+// TODO: xx/yy progress bar display
 // TODO: Break up main function
 // TODO: Clean renderer
-// TODO: Smart error messages and error clearing
+// TODO: Smart error messages and error clearing / time based error clearing
 // TODO: Untangle main()
 // TODO: Playlist view
 // TODO: Enable path resetting
-// TODO: Clear warnings from compiler
 // TODO: Add validation that the four flags are ready before running mp3 copier
 // TODO: Break up megafunctions
 // TODO: COMMENT COMMENT COMMENT COMMENT (this code is unreadable in places)
 // NOTE: Regarding above: I know rust is hard to read, but this is worse than haskell
 // NOTE: Regarding above: Fuck async :)
+// TODO: Centralise 'set status' and 'set error'
 //--------------------------------------------------------------------------------------------------------------------------------------
 // REGION: Path detection
 
@@ -174,6 +173,8 @@ fn ExtractTitleFromPath(path: &Path) -> anyhow::Result<Option<String>> {
     Ok(None)
 }
 
+// This gets the genre from track metadata
+// RETURNS: String or error
 fn ExtractGenreFromPath(path: &Path) -> anyhow::Result<Option<String>> {
     let taggedFile = read_from_path(path)?;
     
@@ -361,7 +362,53 @@ fn SetTxtFileLocation() -> String {
     }
 }
 
+// ENDREGION
 // --------------------------------------------------------------------------------------------------------------------------------------
+
+// --------------------------------------------------------------------------------------------------------------------------------------
+// REGION: Main helper functions
+
+fn Main_RemovableDriveCheck(app: Arc<Mutex<App>>) -> String {
+    let letter = DetectRemovableDrives();
+    if !letter.is_empty() {
+        let originPath = format!("{}:\\", letter);
+        if let Ok(mut app) = app.lock() {
+            app.SetDriveLetter(format!("{}:\\", letter));
+            app.SetDriveStatus(true);
+            return originPath;
+        }
+    }
+
+    return String::new();
+}
+
+fn Main_SetDesktopState(app: Arc<Mutex<App>>) -> String {
+    // There is no validation here because there is the reasonable assumption our users have a desktop
+    // If our users do not have a desktop I am quitting programming forever
+    let deskPath = GetDesktopPath();
+    if let Ok(mut app) = app.lock() {
+        app.SetDesktopStatus(true);
+    }
+
+    return deskPath;
+}
+
+fn Main_SetPlaylistsPath(app: Arc<Mutex<App>>, args: Args) -> String {
+    // TODO: Validate path
+    let txtPath = args.target.unwrap_or_else(|| SetTxtFileLocation());
+
+    if !txtPath.is_empty() {
+        if let Ok(mut app) = app.lock() {
+            app.SetPlaylistStatus(true);
+        }
+    }
+    return txtPath;
+}
+
+
+// ENDREGION
+// ---------------------------------------------------------------------------------------------------------------------------------------
+
 
 fn main() -> std::io::Result<()> {
     enable_raw_mode()?;
@@ -371,54 +418,26 @@ fn main() -> std::io::Result<()> {
 
     // Program state
     let trackMap = Arc::new(Mutex::new(HashMap::new()));
-    let mut originPath = String::new();
 
+    // Establish ratatui state
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-
     let app = Arc::new(Mutex::new(App::new()));
 
-    let appClone = Arc::clone(&app);
-    std::thread::spawn(move || {
-        // Long-running work
-        let mut app = appClone.lock().unwrap();
-        app.SetStatusMessage("Copying files...");
-        drop(app); // Release lock before slow work
-
-    });
-
-    // TODO: Put these path checks into small functions
     // Check for paths and drives
-    let letter = DetectRemovableDrives();
-    if !letter.is_empty() {
-        originPath = format!("{}:\\", letter);
-        if let Ok(mut app) = app.lock() {
-            app.SetDriveLetter(format!("{}:\\", letter));
-            app.SetDriveStatus(true);
-        }
-    }
+    let originPath = Main_RemovableDriveCheck(app.clone());
+    let desktopPath = Main_SetDesktopState(app.clone());
+    let txtPath = Main_SetPlaylistsPath(app.clone(), args);
 
-    // User having no desktop is an unrecoverable issue
-    let desktopPath = GetDesktopPath();
-    // Lock mutex and access
-    if let Ok(mut app) = app.lock() {
-        app.SetDesktopStatus(true);
-    }
-    
-    let txtPath = args.target.unwrap_or_else(|| SetTxtFileLocation());
-    if !txtPath.is_empty() {
-        if let Ok(mut app) = app.lock() {
-            app.SetPlaylistStatus(true);
-        }
-    }
-
+    // Ratatui mainloop
     loop {
         let appGuard = app.lock().unwrap();
         terminal.draw(|f| ui(f, &appGuard))?;
         drop(appGuard);
 
+        // Keypress inputs
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
@@ -479,7 +498,8 @@ fn main() -> std::io::Result<()> {
                     _ => continue
                 }
             }
-           
+          
+            // Determines if trackmap is needing to be built
             let shouldBuild = {
                 let app = app.lock().unwrap();
                 app.playlist_detected && app.track_map_created == false
