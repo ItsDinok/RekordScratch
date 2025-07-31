@@ -40,6 +40,4 @@ If any help is needed, `-h` or `--help` both bring up a currently small help men
 ## Intended upgrades
 
 1. Support for .wav files
-2. Better UI (using ratatui)
-3. Algorithmic efficiency
-4. Less rigidity about the Playlists folder
+2. Less rigidity about the Playlists folder
