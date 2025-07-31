@@ -1,28 +1,36 @@
 # RekordScratch
-
-A Rust-based tool to recover MP3 files from Rekordbox-playable USB files: reverting them to playlist or genre layout.
+> A Rust-based tool to recover MP3 files from Rekordbox-playable USB files: reverting them to playlist or genre layout.
 
 ## What is RekordScratch?
 
-**RekordScratch** allows you to copy playlists off of a rekordbox USB in the event that the tracks are no longer on your master rekordbox database, or if you found a USB on the floor and inexplicably plugged it in, finding out it was a rekordbox USB. Rekordbox presently provides **no native way** to export this data back to your host machine, providing a frustrating experience involving manually ccopying and reassembling the playlists yourself.
-
-Whether you’ve lost your source library or just want your organization back, this tool extracts MP3s from a Rekordbox-playable USB and restores them to their original hierarchy — if recoverable.
+**RekordScratch** lets you recover MP3s from a Rekordbox USB — even if the original Rekordbox database is gone.  
+Whether you lost your library, switched machines, or just found a USB on the floor (I won’t ask), this tool helps you extract tracks and rebuild their original playlist or genre structure.
 
 ## Features
 
 - Extracts MP3s from Rekordbox-exported USBs
-- Rebuilds the original folder structure based on track metadata and file paths
-- Currently reads the USB's `PIONEER` structure directly (no RB database parsing yet)
+- Rebuilds the original folder structure based on track metadata, or title if metadata isn't available
 - It automatically ignores non-rekordbox USB devices
+- Simple UI structure
+- Does **NOT** parse proprietary Rekordbox pdb structure (I enjoy not being in lawsuits)
 
 ## Usage
 
 1. Plug in your Rekordbox-formatted USB.
 2. Export playlist.txt files from Rekordbox, store them somewhere in a 'Playlists' folder
-2. Run the tool from the command line in the parent directory of the 'Playlists' folder:
+3. Place the 'Playlists' folder next to the executable
+4. Run the tool 
 
+Build with: 
 ```bash
 cargo run --release
+```
+
+4.5. Or use the latest release
+
+If you have a custom playlusts folder you can also use
+```bash
+cargo run --release -t "C:/Users/path/to/Playlists"
 ```
 
 ## Requirements
