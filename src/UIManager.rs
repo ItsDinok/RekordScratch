@@ -6,20 +6,20 @@ use ratatui::{
     text::{Line, Span},
 };
 use ratatui::layout::Alignment;
+use ratatui::prelude::Rect;
 use crate::App;
 
 pub fn ui(f: &mut Frame, app: &App) {
     let size = f.size();
 
-    // Layout: add a box below progress bar for the text lines
+    // Layout with no extra box below progress, so just 5 chunks
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
         .constraints([
             Constraint::Length(3),  // Title
             Constraint::Min(8),     // Middle: status boxes
-            Constraint::Length(3),  // Progress bar
-            Constraint::Length(3),  // Box for progress % + files xx/yy
+            Constraint::Length(6),  // Progress bar + text (combined)
             Constraint::Length(3),  // Current file
             Constraint::Length(3),  // Controls
         ])
@@ -85,9 +85,32 @@ pub fn ui(f: &mut Frame, app: &App) {
         .wrap(Wrap { trim: true });
     f.render_widget(error_paragraph, right_chunks[1]);
 
-    // Progress bar (without default percentage label)
+    // Inside the progress chunk, split vertically into two parts:
+    // 1) Gauge (progress bar) top 3 lines
+    // 2) Progress info text bottom 3 lines
+    let _progress_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(3),
+        ])
+        .split(chunks[2]);
+
+    // Outer block with borders around both progress bar and text
+    let progress_block = Block::default().title("Progress").borders(Borders::ALL);
+    f.render_widget(progress_block.clone(), chunks[2]);
+
+    // Render progress bar gauge inside the top half (minus borders)
+    // Note: To avoid double borders, render gauge inside inner area (chunks[2] shrunk by borders)
+    let inner = progress_block.inner(chunks[2]);
+    let gauge_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: 3,
+    };
+
     let gauge = Gauge::default()
-        .block(Block::default().title("Progress").borders(Borders::ALL))
         .gauge_style(
             Style::default()
                 .fg(Color::Magenta)
@@ -95,28 +118,33 @@ pub fn ui(f: &mut Frame, app: &App) {
                 .add_modifier(Modifier::BOLD),
         )
         .ratio(app.progress as f64);
-    f.render_widget(gauge, chunks[2]);
+    f.render_widget(gauge, gauge_area);
 
-    // Box below progress bar for percentage and files processed
+    // Render the progress info text in the bottom half of the box
+    let info_area = Rect {
+        x: inner.x,
+        y: inner.y + 3,
+        width: inner.width,
+        height: 3,
+    };
+
     let progress_text = format!("Progress: {:.0}%", app.progress * 100.0);
     let files_text = format!("Files processed: {}/{}", app.files_cleared, app.files_total);
 
-    // Compose multiline paragraph with the two lines stacked vertically
     let progress_info = Paragraph::new(vec![
         Line::from(progress_text),
         Line::from(files_text),
     ])
-    .block(Block::default().borders(Borders::ALL).title("Progress Info"))
     .alignment(Alignment::Left);
 
-    f.render_widget(progress_info, chunks[3]);
+    f.render_widget(progress_info, info_area);
 
     // Current file display
     let current_file_text = app.current_file.clone().unwrap_or_else(|| "None".into());
     let current_file_paragraph = Paragraph::new(current_file_text)
         .block(Block::default().title("Current File").borders(Borders::ALL))
         .wrap(Wrap { trim: true });
-    f.render_widget(current_file_paragraph, chunks[4]);
+    f.render_widget(current_file_paragraph, chunks[3]);
 
     // Controls hint bar
     let controls_line = Line::from(vec![
@@ -132,5 +160,5 @@ pub fn ui(f: &mut Frame, app: &App) {
     let controls_paragraph = Paragraph::new(controls_line)
         .block(Block::default().borders(Borders::ALL).title("Controls"))
         .wrap(Wrap { trim: true });
-    f.render_widget(controls_paragraph, chunks[5]);
+    f.render_widget(controls_paragraph, chunks[4]);
 }

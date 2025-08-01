@@ -8,7 +8,6 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen}
 };
 use lofty::{read_from_path, ItemKey, TaggedFileExt};
-use std::sync::mpsc::{channel, Receiver, Sender};
 use sysinfo::{System, SystemExt, DiskExt};
 use std::io::{BufRead, BufReader, Write};
 use ratatui::backend::CrosstermBackend;
@@ -21,7 +20,6 @@ use walkdir::WalkDir;
 use std::fs::File;
 use UIManager::ui;
 use clap::Parser;
-use std::thread;
 use app::App;
 use std::fs;
 use std::io;
@@ -31,11 +29,8 @@ use dirs;
 // TASKLIST
 //
 // TODO: Playlist view
-
-// FIXME: Late trackmap DOES NOT WORK
-
-// NOTE: This file is 600 lines long. A lot of that is comments, but it should still be broken up
-// NOTE: Main is a little more tangled than I would like but UI is like that
+// TODO: Add help control
+// TODO: Add about control
 // --------------------------------------------------------------------------------------------------------------------------------------
 
 // --------------------------------------------------------------------------------------------------------------------------------------
@@ -117,7 +112,7 @@ fn BuildMapFromTxt(trackMap: &mut HashMap<String, String>, txtPath: &str) -> std
             }
         }
     }
-
+    
     Ok(())
 }
 
@@ -434,7 +429,6 @@ fn Main_SetDesktopState(app: Arc<Mutex<App>>) -> String {
 // This sets the playlists path
 // RETURNS: Playlists path, and it alters app state
 fn Main_SetPlaylistsPath(app: Arc<Mutex<App>>, args: Args) -> String {
-    // TODO: Validate path
     let txtPath = args.target.unwrap_or_else(|| SetTxtFileLocation());
 
     if !txtPath.is_empty() {
@@ -468,7 +462,7 @@ fn Main_RescanForDrives(app: Arc<Mutex<App>>) -> String {
 
 // This starts the copyMp3 function
 // RETURNS: Nothing
-fn Main_StartMp3(app: Arc<Mutex<App>>, origin: String, desktop: String, map: HashMap<String, String>) {
+fn Main_StartMp3(app: &Arc<Mutex<App>>, origin: String, desktop: String, map: HashMap<String, String>) {
     // Mutex clones
     let appClone = Arc::clone(&app);
     let desktopClone = desktop.clone();
@@ -497,52 +491,6 @@ fn Main_StartMp3(app: Arc<Mutex<App>>, origin: String, desktop: String, map: Has
 
 }
 
-// This is used to build the trackmap after the mutex construction
-// RETURNS: Nothing, this is a bug // FIXME
-fn Main_BuildLateTrackMap(app: Arc<Mutex<App>>, txtPath: String, map: Arc<Mutex<HashMap<String, String>>>) {
-    let appClone = Arc::clone(&app);
-    let txtPathClone = txtPath.clone();
-    let mapClone = Arc::clone(&map);
-
-    std::thread::spawn(move || {
-        {
-            let mut app = appClone.lock().unwrap();
-            app.SetStatusMessage("Building trackmap");
-        }
-        {
-            let mut lockedMap = mapClone.lock().unwrap();
-            let _ = BuildMapFromTxt(&mut lockedMap, &txtPathClone);
-        }
-        {
-            let mut app = appClone.lock().unwrap();
-            app.SetStatusMessage("Trackmap built");
-            app.SetTrackMapStatus(true);
-        }
-    });
-}
-
-// This checks to see if all requirements are met to launch the mp3 function
-// RETURNS: Bool, true if all flags are good
-fn Main_CheckLaunchFlags(app: Arc<Mutex<App>>) -> bool {
-    let appClone = Arc::clone(&app);
-    let app = appClone.lock().unwrap();
-
-    return
-        app.desktop_detected &&
-        app.playlist_detected &&
-        app.track_map_created &&
-        app.drive_detected;
-}
-
-// This function allows the user to change the path to their playlists.txt folder
-// RETURNS: String corresponding to playlist path
-fn Main_LetUserChangePlaylistsPath() -> String {
-    match rfd::FileDialog::new().pick_folder() {
-        Some(path) => return path.to_string_lossy().into_owned(),
-        None => return String::new(),
-    };
-}
-
 // ---------------------------------------------------------------------------------------------------------------------
 
 fn main() -> std::io::Result<()> {
@@ -554,7 +502,6 @@ fn main() -> std::io::Result<()> {
     // Program state
     let trackMap = Arc::new(Mutex::new(HashMap::new()));
     let mut errorTicks = 0;
-    let (pathTx, pathRx): (Sender<String>, Receiver<String>) = channel();
 
     // Establish ratatui state
     let mut stdout = io::stdout();
@@ -566,13 +513,24 @@ fn main() -> std::io::Result<()> {
     // Check for paths and drives
     let mut originPath = Main_RemovableDriveCheck(app.clone());
     let desktopPath = Main_SetDesktopState(app.clone());
-    let mut txtPath = Main_SetPlaylistsPath(app.clone(), args);
+    let txtPath = Main_SetPlaylistsPath(app.clone(), args);
+    
+    { 
+        let mut map = trackMap.lock().unwrap();
+        let _ = BuildMapFromTxt(&mut map, &txtPath);
+
+        let mut appGuard = app.lock().unwrap();
+        appGuard.SetTrackMapStatus(true);
+        appGuard.SetPlaylistStatus(true);
+    }
 
     // Ratatui mainloop
     loop {
-        let appGuard = app.lock().unwrap();
-        terminal.draw(|f| ui(f, &appGuard))?;
-        drop(appGuard);
+        // Draw UI
+        {
+            let appGuard = app.lock().unwrap();
+            terminal.draw(|f| ui(f, &appGuard))?;
+        }
 
         // Keypress inputs
         if event::poll(Duration::from_millis(100))? {
@@ -591,58 +549,24 @@ fn main() -> std::io::Result<()> {
                         {
                             let mut appGuard = app.lock().unwrap();
                             if appGuard.is_mp3_copying { continue; }
-                        
-                            if !Main_CheckLaunchFlags(app.clone()) {
-                                // TODO: make this error more specific
-                                appGuard.SetError("Launch flags incomplete!");
+
+                            if !(appGuard.desktop_detected && appGuard.playlist_detected
+                                && appGuard.drive_detected && appGuard.track_map_created) {
+                                appGuard.error_message = Some("Not all flags green! Refer to warning lights".to_string());
                                 continue;
                             }
                         }
                         
                         let trackMapClone = Arc::clone(&trackMap);
                         let map = trackMapClone.lock().unwrap();
-                        Main_StartMp3(app.clone(), originPath.clone(), desktopPath.clone(), map.clone());
-                    },
-
-                    // Let user change path
-                    KeyCode::Char('p') => {
-                        // As it can take as long as the user likes, it needs a new thread
-                        let txClone = pathTx.clone();
-                        let appClone = app.clone();
-                        thread::spawn(move || {
-                            let newPath = Main_LetUserChangePlaylistsPath();
-                            if let Err(_) = txClone.send(newPath) {
-                                AppError(&appClone, "Unable to change playlists path".to_string());
-                            }
-                        });
-                        txtPath = Main_LetUserChangePlaylistsPath();
+                        Main_StartMp3(&app.clone(), originPath.clone(), desktopPath.clone(), map.clone());
                     },
 
                     _ => continue
                 }
             }
-          
-            // Determines if trackmap is needing to be built
-            let shouldBuild = {
-                let app = app.lock().unwrap();
-                app.playlist_detected && app.track_map_created == false
-            };
-
-            // Populate trackmap when needed
-            // FIXME: This is bugged
-            if shouldBuild {
-                let map = Arc::new(Mutex::new(HashMap::new()));
-                Main_BuildLateTrackMap(app.clone(), txtPath.clone(), Arc::clone(&map));
-            }
-
-            // Checks for new txt path
-            if let Ok(newTxtPath) = pathRx.try_recv() {
-                txtPath = newTxtPath;
-                let mut appGuard = app.lock().unwrap();
-                appGuard.playlist_detected = true;
-            }
         }
-
+           
         // Basic time-based error clearing
         // 50k = 50 seconds
         if errorTicks == 50000 {

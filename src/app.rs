@@ -21,6 +21,7 @@ impl App {
     pub fn new() -> Self {
         Self {
             is_mp3_copying: false,
+
             track_map_created: false,
             desktop_detected: false,
             playlist_detected: false,
