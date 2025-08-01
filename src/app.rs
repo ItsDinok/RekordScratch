@@ -1,15 +1,20 @@
 pub struct App {
     pub track_map_created: bool,
-    pub is_mp3_copying: bool,
-
     pub desktop_detected: bool,
     pub playlist_detected: bool,
     pub drive_detected: bool,
+    
     pub drive_letter: Option<String>,
+    pub current_file: Option<String>,
+    
     pub status_message: String,
     pub error_message: Option<String>,
+    
     pub progress: f64, // 0.0 -> 1.0
-    pub current_file: Option<String>
+    pub is_mp3_copying: bool,
+
+    pub files_cleared: usize,
+    pub files_total: usize
 }
 
 impl App {
@@ -25,7 +30,10 @@ impl App {
             status_message: "Starting...".into(),
             error_message: None,
             progress: 0.0,
-            current_file: None
+            current_file: None,
+            
+            files_cleared: 0,
+            files_total: 0,
         }
     }
 

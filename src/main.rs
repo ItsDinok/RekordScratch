@@ -30,10 +30,7 @@ use dirs;
 // -------------------------------------------------------------------------------------------------------------------------------------
 // TASKLIST
 //
-// TODO: xx/yy progress bar display
-// TODO: Clean renderer
 // TODO: Playlist view
-// TODO: Double check I haven't used too many .clone()
 
 // FIXME: Late trackmap DOES NOT WORK
 
@@ -320,6 +317,11 @@ fn MoveAllMp3(trackMap: &HashMap<String, String>, root: &str, deskPath: &str,
    
     let totalEntries = entries.len() as f64;
     
+    {
+        let mut app = app.lock().unwrap();
+        app.files_total = entries.len();
+    }
+
     // Iterate through all .mp3 files in Contents
     for (idx, entry) in entries.iter().enumerate() {
         let path = entry.path();
@@ -329,6 +331,7 @@ fn MoveAllMp3(trackMap: &HashMap<String, String>, root: &str, deskPath: &str,
         {
             let mut app = app.lock().unwrap();
             app.UpdateProgress((idx as f64 + 1.0) / totalEntries);
+            app.files_cleared += 1;
         }
 
         // Extract title and compare against dictionary
