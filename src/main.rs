@@ -8,6 +8,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen}
 };
 use lofty::{read_from_path, ItemKey, TaggedFileExt};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use sysinfo::{System, SystemExt, DiskExt};
 use std::io::{BufRead, BufReader, Write};
 use ratatui::backend::CrosstermBackend;
@@ -20,6 +21,7 @@ use walkdir::WalkDir;
 use std::fs::File;
 use UIManager::ui;
 use clap::Parser;
+use std::thread;
 use app::App;
 use std::fs;
 use std::io;
@@ -31,7 +33,6 @@ use dirs;
 // TODO: xx/yy progress bar display
 // TODO: Clean renderer
 // TODO: Playlist view
-// TODO: Enable path resetting
 // TODO: Double check I haven't used too many .clone()
 
 // FIXME: Late trackmap DOES NOT WORK
@@ -530,6 +531,15 @@ fn Main_CheckLaunchFlags(app: Arc<Mutex<App>>) -> bool {
         app.drive_detected;
 }
 
+// This function allows the user to change the path to their playlists.txt folder
+// RETURNS: String corresponding to playlist path
+fn Main_LetUserChangePlaylistsPath() -> String {
+    match rfd::FileDialog::new().pick_folder() {
+        Some(path) => return path.to_string_lossy().into_owned(),
+        None => return String::new(),
+    };
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 
 fn main() -> std::io::Result<()> {
@@ -541,6 +551,7 @@ fn main() -> std::io::Result<()> {
     // Program state
     let trackMap = Arc::new(Mutex::new(HashMap::new()));
     let mut errorTicks = 0;
+    let (pathTx, pathRx): (Sender<String>, Receiver<String>) = channel();
 
     // Establish ratatui state
     let mut stdout = io::stdout();
@@ -552,7 +563,7 @@ fn main() -> std::io::Result<()> {
     // Check for paths and drives
     let mut originPath = Main_RemovableDriveCheck(app.clone());
     let desktopPath = Main_SetDesktopState(app.clone());
-    let txtPath = Main_SetPlaylistsPath(app.clone(), args);
+    let mut txtPath = Main_SetPlaylistsPath(app.clone(), args);
 
     // Ratatui mainloop
     loop {
@@ -590,6 +601,20 @@ fn main() -> std::io::Result<()> {
                         Main_StartMp3(app.clone(), originPath.clone(), desktopPath.clone(), map.clone());
                     },
 
+                    // Let user change path
+                    KeyCode::Char('p') => {
+                        // As it can take as long as the user likes, it needs a new thread
+                        let txClone = pathTx.clone();
+                        let appClone = app.clone();
+                        thread::spawn(move || {
+                            let newPath = Main_LetUserChangePlaylistsPath();
+                            if let Err(_) = txClone.send(newPath) {
+                                AppError(&appClone, "Unable to change playlists path".to_string());
+                            }
+                        });
+                        txtPath = Main_LetUserChangePlaylistsPath();
+                    },
+
                     _ => continue
                 }
             }
@@ -601,9 +626,17 @@ fn main() -> std::io::Result<()> {
             };
 
             // Populate trackmap when needed
+            // FIXME: This is bugged
             if shouldBuild {
                 let map = Arc::new(Mutex::new(HashMap::new()));
                 Main_BuildLateTrackMap(app.clone(), txtPath.clone(), Arc::clone(&map));
+            }
+
+            // Checks for new txt path
+            if let Ok(newTxtPath) = pathRx.try_recv() {
+                txtPath = newTxtPath;
+                let mut appGuard = app.lock().unwrap();
+                appGuard.playlist_detected = true;
             }
         }
 
