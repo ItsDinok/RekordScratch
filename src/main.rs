@@ -32,9 +32,7 @@ use dirs;
 // TODO: Clean renderer
 // TODO: Playlist view
 // TODO: Enable path resetting
-// TODO: Centralise 'set status' and 'set error'
 // TODO: Double check I haven't used too many .clone()
-// TODO: Break up MP3 function
 
 // FIXME: Late trackmap DOES NOT WORK
 
@@ -169,6 +167,14 @@ fn AppError(app: &Arc<Mutex<App>>, msg: String) {
     }
 }
 
+// This is a utility function that handles setting status messages
+// RETURNS: Nothing, it modifies app state
+fn AppStatus(app: &Arc<Mutex<App>>, msg: String) {
+    if let Ok(mut guard) = app.lock() {
+        guard.SetStatusMessage(msg.to_string());
+    }
+}
+
 // This gets the title from track metadata
 // RETURNS: String or error
 fn ExtractTitleFromPath(path: &Path) -> anyhow::Result<Option<String>> {
@@ -246,6 +252,57 @@ fn Genre_CopyTrackToFolder(outputRoot: &Path, folderName: &str, srcPath: &Path) 
     Ok(())
 }
 
+// This handles the case where track metadata can be found
+// RETURNS: Bool corresponding to success
+fn MatchByTitle(app: &Arc<Mutex<App>>, title: String, outputRoot: &Path, path: &Path, trackMap: &HashMap<String, String>) -> bool {
+    {
+        let mut app = app.lock().unwrap();
+        app.SetCurrentFile(format!("Processing: {}", title));
+    }
+
+    if let Some(folder) = trackMap.get(&title) {
+        if let Err(e) = CopyTrackToFolder(&outputRoot, folder, path) {
+            AppError(&app, format!("Failed to copy {}: {}", path.display(), e));    
+        }
+        else {
+            return true;
+        }
+    } 
+    return false;
+}
+
+// This handles the case where no metadata can be found and an attempt is made to match the filename
+// RETURNS: Bool corresponding to success
+fn MatchByFileName(app: &Arc<Mutex<App>>, stem: &str, outputRoot: &Path, path: &Path, trackMap: &HashMap<String, String>) -> bool {
+    if let Some(folder) = trackMap.get(stem) {
+        if let Err(e) = CopyTrackToFolder(&outputRoot, folder, path) {
+            AppError(&app, format!("Failed to copy {}: {}", path.display(), e));  
+        }
+        else {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// This is the fallback, it will attempt to sort by genre, then fallback to "unknown"
+// RETURNS: Track title corresponding to track not found
+fn NoMatchFound (app: &Arc<Mutex<App>>, outputRoot: &Path, path: &Path) -> String{
+    // Default to genre data
+    if let Ok(Some(genre)) = ExtractGenreFromPath(path) {
+        if let Err(e) = Genre_CopyTrackToFolder(&outputRoot, &genre, path) {
+            AppError(&app, format!("Failed to copy {}: {}", path.display(), e)); 
+        }
+    }
+
+    // No match found in dictionary
+    let trackTitle = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown filename");
+    AppError(&app, format!("Failed to identify playlist for: {}", trackTitle.to_string()));
+
+    return trackTitle.to_string();
+}
+
 // This copies the files to their respective folders
 // RETURNS: Nothing, this is the final function
 fn MoveAllMp3(trackMap: &HashMap<String, String>, root: &str, deskPath: &str,
@@ -261,13 +318,13 @@ fn MoveAllMp3(trackMap: &HashMap<String, String>, root: &str, deskPath: &str,
         .filter(|e| e.file_type().is_file() && e.path().extension().map_or(false, |ext| ext.eq_ignore_ascii_case("mp3"))).collect();
    
     let totalEntries = entries.len() as f64;
+    
     // Iterate through all .mp3 files in Contents
     for (idx, entry) in entries.iter().enumerate() {
-        let mut matched = false;
-        
         let path = entry.path();
         let outputRoot = Path::new(deskPath).join("RekordCrates");
 
+        // I don't think this needs to be a function yet, it is just ugly code
         {
             let mut app = app.lock().unwrap();
             app.UpdateProgress((idx as f64 + 1.0) / totalEntries);
@@ -275,56 +332,30 @@ fn MoveAllMp3(trackMap: &HashMap<String, String>, root: &str, deskPath: &str,
 
         // Extract title and compare against dictionary
         if let Ok(Some(title)) = ExtractTitleFromPath(path) {
-            {
-                let mut app = app.lock().unwrap();
-                app.SetCurrentFile(format!("Processing: {}", title));
-            }
-
-            if let Some(folder) = trackMap.get(&title) {
-                if let Err(e) = CopyTrackToFolder(&outputRoot, folder, path) {
-                    AppError(&app, format!("Failed to copy {}: {}", path.display(), e));    
-                }
-                else {
-                    tracksMatched += 1;
-                    matched = true;
-                }
+            let success = MatchByTitle(&app, title, &outputRoot, path, trackMap);
+            if success {
+                tracksMatched += 1;
+                continue;
             }
         }
         // Search by filename instead (sometimes the way)
         else if let Some(stem) = path.file_stem().and_then(|s| s.to_str()){
-            if let Some(folder) = trackMap.get(stem) {
-                if let Err(e) = CopyTrackToFolder(&outputRoot, folder, path) {
-                    AppError(&app, format!("Failed to copy {}: {}", path.display(), e));  
-                }
-                else {
-                    tracksMatched += 1;
-                    matched = true;
-                }
+            let success = MatchByFileName(&app, stem, &outputRoot, path, trackMap);
+            if success {
+                tracksMatched += 1;
+                continue;
             }
         }
 
-        if !matched {
-            // Default to genre data
-            if let Ok(Some(genre)) = ExtractGenreFromPath(path) {
-                if let Err(e) = Genre_CopyTrackToFolder(&outputRoot, &genre, path) {
-                    AppError(&app, format!("Failed to copy {}: {}", path.display(), e)); 
-                }
-            }
-
-            // No match found in dictionary
-            tracksNotMatched += 1;
-            let trackTitle = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown filename");
-            unsorted.push(trackTitle.to_string());                    
-            AppError(&app, format!("Failed to identify playlist for: {}", trackTitle.to_string()));
-        }
+        let trackTitle = NoMatchFound(&app, &outputRoot, path);
+        unsorted.push(trackTitle.to_string());                    
+        tracksNotMatched += 1;
     }
 
-    {
-        let mut app = app.lock().unwrap();
-        app.SetError(format!("{} tracks not matched.", tracksNotMatched));
-        app.SetStatusMessage(format!("{} tracks matched successfully.", tracksMatched));
-    }
+    AppError(&app, format!("{} tracks not matched.", tracksNotMatched));
+    AppStatus(&app, format!("{} tracks matches successfully.", tracksMatched));
 
+    // Write all unsorted tracks to an external txt for user review
     let mut file = File::create("NotMatched.txt").expect("Error creating output file");
     for line in unsorted {
         writeln!(file, "{}", line).expect("Failed to write to file.");
@@ -431,6 +462,8 @@ fn Main_RescanForDrives(app: Arc<Mutex<App>>) -> String {
     return letter;
 }
 
+// This starts the copyMp3 function
+// RETURNS: Nothing
 fn Main_StartMp3(app: Arc<Mutex<App>>, origin: String, desktop: String, map: HashMap<String, String>) {
     // Mutex clones
     let appClone = Arc::clone(&app);
@@ -460,6 +493,8 @@ fn Main_StartMp3(app: Arc<Mutex<App>>, origin: String, desktop: String, map: Has
 
 }
 
+// This is used to build the trackmap after the mutex construction
+// RETURNS: Nothing, this is a bug // FIXME
 fn Main_BuildLateTrackMap(app: Arc<Mutex<App>>, txtPath: String, map: Arc<Mutex<HashMap<String, String>>>) {
     let appClone = Arc::clone(&app);
     let txtPathClone = txtPath.clone();
